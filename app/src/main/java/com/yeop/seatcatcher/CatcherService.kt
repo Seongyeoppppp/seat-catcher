@@ -329,11 +329,11 @@ class CatcherService : AccessibilityService() {
         }
         val btn = ScreenParser.findRefresh(items, screenW, screenH)
         val ok = if (btn != null) clickNode(btn, win) else swipeDown(win)
-        val base = prefs.intervalSec.coerceAtLeast(10) * 1000L
+        val base = prefs.intervalSec.coerceAtLeast(2) * 1000L
         nextRefreshAt = now() + (base * Random.nextDouble(0.8, 1.3)).toLong()
         mustRefresh = false
         setStatus(if (ok) "새로고침" else "새로고침 버튼을 못 찾음 (디버그 덤프 보내주세요)")
-        go(State.WAIT_LOAD, 2000)
+        go(State.WAIT_LOAD, 1200)
     }
 
     private fun finish(msg: String, success: Boolean) {
