@@ -57,6 +57,7 @@ class CatcherService : AccessibilityService() {
         private const val MAX_FAILS = 15
 
         private val SUCCESS_KEYS = listOf("결제하기", "결제기한", "결제금액", "결제수단", "예약완료", "예매완료", "발권하기")
+        private val RESERVED_KEYS = listOf("예약이완료", "예매가완료", "예약완료", "예매완료", "완료되었습니다", "결제하지않으면")
         private val FAIL_KEYS = listOf("잔여석", "좌석이없", "매진되었", "판매가완료", "판매완료", "실패", "오류", "다시시도")
         private val CONFIRM_BUTTONS = setOf("확인", "예", "네", "예매하기", "예약하기")
         private val CLOSE_BUTTONS = setOf("확인", "닫기")
@@ -323,6 +324,19 @@ class CatcherService : AccessibilityService() {
         val confirmBtn = items.lastOrNull { ScreenParser.norm(it.text) in CONFIRM_BUTTONS }
         val closeBtn = items.lastOrNull { ScreenParser.norm(it.text) in CLOSE_BUTTONS }
         val failed = FAIL_KEYS.any { joined.contains(it) }
+
+        // "승차권 예약이 완료되었습니다 … [장바구니 담기] [결제]" 팝업
+        val reserved = RESERVED_KEYS.any { joined.contains(it) }
+        if (reserved) {
+            val pay = items.filter { ScreenParser.norm(it.text) == "결제" }.maxByOrNull { it.rect.centerY() }
+            val paid = pay != null && clickRect(pay.node, pay.rect, win)
+            finish(
+                if (paid) "예약 완료! $target\n결제 화면을 열어뒀어요. 결제기한 안에 결제하세요"
+                else "예약 완료! $target\n코레일 앱에서 [결제]를 눌러 결제하세요",
+                success = true,
+            )
+            return
+        }
 
         when {
             !sheetStillOpen && SUCCESS_KEYS.any { joined.contains(it) } -> {
