@@ -305,7 +305,7 @@ class CatcherService : AccessibilityService() {
         }
         if (scanDoneAt == 0L) {
             scanDoneAt = now
-            val rest = prefs.intervalSec.coerceAtLeast(0) * 1000L
+            val rest = prefs.restMs.coerceAtLeast(0).toLong()
             nextRefreshAt = now + if (rest == 0L) 0L else (rest * Random.nextDouble(0.8, 1.3)).toLong()
         }
         if (now >= nextRefreshAt) {

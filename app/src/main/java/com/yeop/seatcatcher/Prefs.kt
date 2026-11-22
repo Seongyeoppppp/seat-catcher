@@ -27,9 +27,10 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("seat", 0)
         set(v) = sp.edit().putInt("seat", v).apply()
 
-    var intervalSec: Int
-        get() = sp.getInt("interval", 1)
-        set(v) = sp.edit().putInt("interval", v).apply()
+    /** 매진 확인 후 쉬는 시간 (밀리초, 0.01초 단위) */
+    var restMs: Int
+        get() = sp.getInt("restMs", sp.getInt("interval", 1) * 1000)
+        set(v) = sp.edit().putInt("restMs", v).apply()
 
     var maxMinutes: Int
         get() = sp.getInt("maxmin", 180)
