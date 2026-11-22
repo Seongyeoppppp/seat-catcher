@@ -13,7 +13,7 @@ object ScreenParser {
     data class Item(
         val text: String,
         val rect: Rect,
-        val node: AccessibilityNodeInfo,
+        val node: AccessibilityNodeInfo?,   // OCR로 읽은 글자는 null
         val clickable: Boolean,
     )
 
@@ -21,7 +21,8 @@ object ScreenParser {
         val cls: String,          // "일반실" / "특실"
         val available: Boolean,   // 가격(…원)이 떠 있으면 true. 입석+좌석, 매진은 false
         val status: String,
-        val node: AccessibilityNodeInfo,
+        val node: AccessibilityNodeInfo?,
+        val rect: Rect,
         val y: Int,
     )
 
@@ -29,7 +30,7 @@ object ScreenParser {
 
     private val TIME = Regex("^(\\d{1,2}):(\\d{2})$")
     private val TIME_ANY = Regex("(\\d{1,2}):(\\d{2})")
-    private val PRICE = Regex("^[\\d,]+원$")
+    private val PRICE = Regex("^\\d{1,3}(,\\d{3})+원?$")
     private val MERGED_SEAT = Regex("(일반실|특실)\\s*([\\d,]+\\s*원|매진|입석\\s*\\+\\s*좌석|입석|예약대기)")
     private val REFRESH_WORDS = Regex("새로\\s*고침|refresh|reload|갱신", RegexOption.IGNORE_CASE)
     private val CLASSES = setOf("일반실", "특실")
@@ -102,10 +103,10 @@ object ScreenParser {
                             o.rect.left >= lab.rect.right - 10
                     }.minByOrNull { it.rect.left }
                     val stText = st?.let { norm(it.text) } ?: ""
-                    seats.add(Seat(t, PRICE.matches(stText), stText, st?.node ?: lab.node, lab.rect.centerY()))
+                    seats.add(Seat(t, PRICE.matches(stText), stText, st?.node ?: lab.node, st?.rect ?: lab.rect, lab.rect.centerY()))
                 } else {
                     MERGED_SEAT.findAll(lab.text).forEach { m ->
-                        seats.add(Seat(m.groupValues[1], PRICE.matches(norm(m.groupValues[2])), m.groupValues[2], lab.node, lab.rect.centerY()))
+                        seats.add(Seat(m.groupValues[1], PRICE.matches(norm(m.groupValues[2])), m.groupValues[2], lab.node, lab.rect, lab.rect.centerY()))
                     }
                 }
             }
@@ -122,7 +123,7 @@ object ScreenParser {
     private fun parseMerged(items: List<Item>): List<Row> = items.mapNotNull { it ->
         val tm = TIME_ANY.find(it.text) ?: return@mapNotNull null
         val seats = MERGED_SEAT.findAll(it.text).map { m ->
-            Seat(m.groupValues[1], PRICE.matches(norm(m.groupValues[2])), m.groupValues[2], it.node, it.rect.centerY())
+            Seat(m.groupValues[1], PRICE.matches(norm(m.groupValues[2])), m.groupValues[2], it.node, it.rect, it.rect.centerY())
         }.toList()
         if (seats.isEmpty()) null
         else Row(toMin(tm.groupValues[1], tm.groupValues[2]), tm.value, seats.distinctBy { s -> s.cls })
@@ -130,7 +131,7 @@ object ScreenParser {
 
     /** 상단 새로고침 버튼 찾기 */
     fun findRefresh(items: List<Item>, w: Int, h: Int): AccessibilityNodeInfo? {
-        val top = items.filter { it.rect.centerY() < h * 0.1 }
+        val top = items.filter { it.rect.centerY() < h * 0.1 && it.node != null }
         top.firstOrNull { REFRESH_WORDS.containsMatchIn(it.text) }?.let { return it.node }
         // 라벨이 없으면: 오른쪽 위 아이콘들 중 장바구니(맨 오른쪽) 바로 왼쪽
         val icons = top.filter {

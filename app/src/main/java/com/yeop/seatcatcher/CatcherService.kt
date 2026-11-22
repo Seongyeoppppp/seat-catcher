@@ -2,20 +2,26 @@ package com.yeop.seatcatcher
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.TextView
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import java.io.File
 import kotlin.random.Random
 
@@ -25,6 +31,12 @@ import kotlin.random.Random
  *               없으면 간격마다 새로고침
  *  WAIT_SHEET : 아래에서 올라온 창에서 등급 확인 → "바로 예매" 탭
  *  WAIT_RESULT: 결제 화면이 뜨면 성공 → 알림 + 종료 / 실패 팝업이면 닫고 다시 SCAN
+ *
+ * 화면 읽기
+ *  - 코레일 새 앱은 열차 줄이 글자 없는 버튼이라 접근성으로 못 읽음
+ *    → 화면 캡처 + 한국어 OCR(기기 안에서 처리)로 시간/가격을 읽고,
+ *      클릭은 그 위치의 버튼 노드에 직접 보냄
+ *  - 알림 배너, 상태바처럼 코레일 위에 떠 있는 창 영역의 글자는 OCR 결과에서 제외
  *
  * 다른 알림 오작동 방지
  *  - 화면 좌표 탭이 아니라 "코레일 앱 안의 버튼 노드"에 직접 클릭 액션을 보냄
@@ -69,6 +81,16 @@ class CatcherService : AccessibilityService() {
     private var overlay: TextView? = null
     private var screenW = 1080
     private var screenH = 2400
+
+    // OCR
+    private val recognizer by lazy { TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build()) }
+    private var ocrBusy = false
+    private var ocrItems: List<ScreenParser.Item> = emptyList()
+    private var ocrShotAt = 0L
+    private var lastShotReq = 0L
+    private var lastActionAt = 0L
+    private var ocrError = ""
+    private var a11yItems: List<ScreenParser.Item> = emptyList()
 
     private fun now() = SystemClock.elapsedRealtime()
 
@@ -140,16 +162,33 @@ class CatcherService : AccessibilityService() {
         waitUntil = now() + waitMs
     }
 
+    private fun sizeFrom(win: AccessibilityWindowInfo) {
+        val r = Rect()
+        win.getBoundsInScreen(r)
+        if (r.width() > 0 && r.height() > 0) {
+            screenW = r.width()
+            screenH = r.height()
+        } else {
+            screenW = resources.displayMetrics.widthPixels
+            screenH = resources.displayMetrics.heightPixels
+        }
+    }
+
+    private fun ocrValid() = ocrShotAt > lastActionAt + 250
+
     private fun step() {
-        val dm = resources.displayMetrics
-        screenW = dm.widthPixels
-        screenH = dm.heightPixels
         val now = now()
 
         if (dumpAt in 1..now) {
-            topKorailWindow()?.root?.let { root ->
-                writeDump(root)
-                dumpAt = 0L
+            val w = topKorailWindow()
+            if (w != null) {
+                sizeFrom(w)
+                requestOcr(w)
+                val root = w.root
+                if (root != null && (ocrShotAt >= dumpAt || now - dumpAt > 8000)) {
+                    writeDump(root)
+                    dumpAt = 0L
+                }
             }
             if (dumpAt != 0L && now - dumpAt > 15_000) dumpAt = 0L
         }
@@ -172,7 +211,10 @@ class CatcherService : AccessibilityService() {
         }
         val root = win.root ?: return
         root.packageName?.toString()?.let { if (it != prefs.korailPkg) prefs.korailPkg = it }
-        val items = ScreenParser.collect(root)
+        sizeFrom(win)
+        requestOcr(win)
+        a11yItems = ScreenParser.collect(root)
+        val items = if (ocrValid()) a11yItems + ocrItems else a11yItems
 
         when (state) {
             State.IDLE -> Unit
@@ -189,6 +231,7 @@ class CatcherService : AccessibilityService() {
         // 예매 창이 열린 채로 남아 있으면 닫기
         if (items.any { ScreenParser.norm(it.text) == "바로예매" }) {
             performGlobalAction(GLOBAL_ACTION_BACK)
+            lastActionAt = now()
             go(State.WAIT_LOAD, 1000)
             return
         }
@@ -203,12 +246,16 @@ class CatcherService : AccessibilityService() {
         }
 
         val rows = ScreenParser.parseRows(items, screenW, screenH)
+        if (rows.isEmpty() && !ocrValid()) {
+            setStatus(if (ocrError.isNotEmpty()) ocrError else "화면 읽는 중…")
+            return
+        }
         val pick = choose(rows)
         if (pick != null) {
             val (row, seat) = pick
             targetCls = seat.cls
             target = "${row.depText} ${seat.cls} ${seat.status}"
-            if (clickNode(seat.node, win)) {
+            if (clickRect(seat.node, seat.rect, win)) {
                 sheetToggled = false
                 go(State.WAIT_SHEET)
                 setStatus("좌석 발견! $target 선택 중")
@@ -220,6 +267,7 @@ class CatcherService : AccessibilityService() {
         if (rows.isNotEmpty() && forwardScrolls < 3 && rows.maxOf { it.depMin } < prefs.endMin) {
             val list = ScreenParser.largestScrollable(root)
             if (list != null && list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+                lastActionAt = now()
                 forwardScrolls++
                 go(State.WAIT_LOAD, 900)
                 return
@@ -230,7 +278,7 @@ class CatcherService : AccessibilityService() {
             refresh(root, items, win)
             return
         }
-        val visible = if (rows.isEmpty()) "열차 인식 안 됨" else "열차 ${rows.size}개 인식"
+        val visible = if (rows.isEmpty()) "열차 인식 안 됨" else "열차 ${rows.size}개 인식(${rows.first().depText}~${rows.last().depText})"
         setStatus("감시 중 · $visible · 다음 새로고침 ${(nextRefreshAt - now) / 1000}초")
     }
 
@@ -238,7 +286,7 @@ class CatcherService : AccessibilityService() {
         val now = now()
         val btn = items.firstOrNull { ScreenParser.norm(it.text) == "바로예매" }
         if (btn == null) {
-            if (now - stateSince > 6000) {
+            if (now - stateSince > 8000) {
                 setStatus("예매 창이 안 열려서 다시 감시")
                 go(State.SCAN)
             }
@@ -253,13 +301,13 @@ class CatcherService : AccessibilityService() {
                     it.rect.centerY() > btn.rect.top - screenH * 0.3
             }.maxByOrNull { it.rect.centerY() }
             if (toggle != null) {
-                clickNode(toggle.node, win)
+                clickRect(toggle.node, toggle.rect, win)
                 waitUntil = now + 500
                 return
             }
         }
         if (now < waitUntil) return
-        if (clickNode(btn.node, win)) {
+        if (clickRect(btn.node, btn.rect, win)) {
             go(State.WAIT_RESULT)
             setStatus("바로 예매 누름 · 결과 확인 중")
         }
@@ -267,6 +315,7 @@ class CatcherService : AccessibilityService() {
 
     private fun doResult(items: List<ScreenParser.Item>, win: AccessibilityWindowInfo) {
         val now = now()
+        if (!ocrValid() && Build.VERSION.SDK_INT >= 30 && now - stateSince < 20_000) return
         val texts = items.map { ScreenParser.norm(it.text) }.filter { it.isNotEmpty() }
         val joined = texts.joinToString("|")
         val sheetStillOpen = texts.any { it == "바로예매" }
@@ -280,7 +329,7 @@ class CatcherService : AccessibilityService() {
                 finish("예매 성공! $target\n코레일 앱에서 결제기한 안에 결제하세요", success = true)
             }
             failed && closeBtn != null -> {
-                clickNode(closeBtn.node, win)
+                clickRect(closeBtn.node, closeBtn.rect, win)
                 fails++
                 if (fails >= MAX_FAILS) {
                     finish("${fails}번 연속 놓쳐서 멈췄어요", success = false)
@@ -293,7 +342,7 @@ class CatcherService : AccessibilityService() {
             confirmBtn != null && joined.contains("하시겠습니까") &&
                 (joined.contains("예매") || joined.contains("예약")) -> {
                 // "예매하시겠습니까?" 같은 확인 팝업
-                clickNode(confirmBtn.node, win)
+                clickRect(confirmBtn.node, confirmBtn.rect, win)
                 stateSince = now
                 setStatus("예매 확인 팝업 → 확인")
             }
@@ -329,6 +378,7 @@ class CatcherService : AccessibilityService() {
         }
         val btn = ScreenParser.findRefresh(items, screenW, screenH)
         val ok = if (btn != null) clickNode(btn, win) else swipeDown(win)
+        lastActionAt = now()
         val base = prefs.intervalSec.coerceAtLeast(2) * 1000L
         nextRefreshAt = now() + (base * Random.nextDouble(0.8, 1.3)).toLong()
         mustRefresh = false
@@ -374,8 +424,21 @@ class CatcherService : AccessibilityService() {
         }
     } catch (e: Exception) { true }
 
+    /** OCR로 찾은 위치면 그 자리의 가장 작은 클릭 가능한 노드(열차 줄 버튼 등)를 직접 클릭 */
+    private fun clickRect(node: AccessibilityNodeInfo?, r: Rect, win: AccessibilityWindowInfo): Boolean {
+        if (node != null) return clickNode(node, win)
+        val x = r.centerX()
+        val y = r.centerY()
+        val target = a11yItems.filter { it.clickable && it.node != null && it.rect.contains(x, y) }
+            .minByOrNull { it.rect.width().toLong() * it.rect.height() }
+        val tn = target?.node
+        if (tn != null) return clickNode(tn, win)
+        return tap(x, y, win)
+    }
+
     /** 노드 직접 클릭(알림 배너에 안 눌림). 안 되면 덮인 곳이 아닐 때만 좌표 탭 */
     private fun clickNode(node: AccessibilityNodeInfo, win: AccessibilityWindowInfo): Boolean {
+        lastActionAt = now()
         var cur: AccessibilityNodeInfo? = node
         var depth = 0
         while (cur != null && depth < 10) {
@@ -392,6 +455,7 @@ class CatcherService : AccessibilityService() {
 
     private fun tap(x: Int, y: Int, win: AccessibilityWindowInfo): Boolean {
         if (pointCovered(x, y, win)) return false
+        lastActionAt = now()
         val p = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, 60))
@@ -471,6 +535,78 @@ class CatcherService : AccessibilityService() {
         overlay = null
     }
 
+    // ───────────── OCR ─────────────
+
+    /** 코레일 위에 떠 있는 다른 앱/시스템 창(알림 배너, 상태바, 우리 상태바) 영역 */
+    private fun coveringRects(win: AccessibilityWindowInfo): List<Rect> = try {
+        windows.filter { w ->
+            w.layer > win.layer &&
+                w.root?.packageName?.toString()?.contains("korail", ignoreCase = true) != true
+        }.map { w -> Rect().also { w.getBoundsInScreen(it) } }
+    } catch (e: Exception) { emptyList() }
+
+    private fun requestOcr(win: AccessibilityWindowInfo) {
+        if (Build.VERSION.SDK_INT < 30) {
+            ocrError = "안드로이드 11 이상에서만 화면 인식이 돼요"
+            return
+        }
+        val now = now()
+        if (ocrBusy || now - lastShotReq < 600) return
+        ocrBusy = true
+        lastShotReq = now
+        val shotAt = now
+        val covers = coveringRects(win)
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                    val hw = result.hardwareBuffer
+                    val bmp = try {
+                        Bitmap.wrapHardwareBuffer(hw, result.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                    } catch (e: Exception) {
+                        null
+                    } finally {
+                        hw.close()
+                    }
+                    if (bmp == null) {
+                        ocrError = "화면 캡처 변환 실패"
+                        ocrBusy = false
+                        return
+                    }
+                    recognizer.process(InputImage.fromBitmap(bmp, 0))
+                        .addOnSuccessListener { text ->
+                            val out = ArrayList<ScreenParser.Item>()
+                            for (b in text.textBlocks) for (l in b.lines) {
+                                l.boundingBox?.let { r ->
+                                    if (covers.none { it.contains(r.centerX(), r.centerY()) }) out.add(ScreenParser.Item(l.text, r, null, false))
+                                }
+                                for (e in l.elements) e.boundingBox?.let { r ->
+                                    if (covers.none { it.contains(r.centerX(), r.centerY()) }) out.add(ScreenParser.Item(e.text, r, null, false))
+                                }
+                            }
+                            ocrItems = out
+                            ocrShotAt = shotAt
+                            ocrError = if (out.isEmpty()) "화면에서 글자를 못 읽음 (캡처가 막혔을 수 있음)" else ""
+                            ocrBusy = false
+                            bmp.recycle()
+                        }
+                        .addOnFailureListener { e ->
+                            ocrError = "글자 인식 실패: ${e.message}"
+                            ocrBusy = false
+                            bmp.recycle()
+                        }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    ocrError = "화면 캡처 실패 (코드 $errorCode)"
+                    ocrBusy = false
+                }
+            })
+        } catch (e: Exception) {
+            ocrError = "화면 캡처 실패: ${e.message}"
+            ocrBusy = false
+        }
+    }
+
     // ───────────── 디버그 ─────────────
 
     private fun writeDump(root: AccessibilityNodeInfo) {
@@ -484,7 +620,9 @@ class CatcherService : AccessibilityService() {
         } catch (_: Exception) {
         }
         sb.append("---\n").append(ScreenParser.dump(root))
-        val rows = ScreenParser.parseRows(ScreenParser.collect(root), screenW, screenH)
+        sb.append("--- OCR (${ocrItems.size}개, 오류='$ocrError')\n")
+        ocrItems.forEach { sb.append("'${it.text}' ${it.rect.toShortString()}\n") }
+        val rows = ScreenParser.parseRows(ScreenParser.collect(root) + ocrItems, screenW, screenH)
         sb.append("--- 인식 결과\n")
         rows.forEach { r ->
             sb.append("${r.depText}: ").append(r.seats.joinToString { "${it.cls}=${it.status}(${if (it.available) "좌석" else "X"})" }).append('\n')

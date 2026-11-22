@@ -22,3 +22,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
+
+dependencies {
+    // 화면 글자 인식 (한국어, 기기 안에서 처리)
+    implementation("com.google.mlkit:text-recognition-korean:16.0.0")
+}
