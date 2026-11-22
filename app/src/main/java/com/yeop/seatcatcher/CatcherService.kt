@@ -228,7 +228,7 @@ class CatcherService : AccessibilityService() {
             // 새로고침 후: 빙글빙글이 나타나길 기다림 (안 나타나면 금방 끝난 것)
             State.LOAD_APPEAR -> when {
                 isLoading() -> { spinnerSeen = true; go(State.LOAD_GONE); setStatus("로딩 중…") }
-                now - stateSince > 2500 -> { lastActionAt = now; go(State.SCAN) }
+                now - stateSince > 1500 -> { lastActionAt = now; go(State.SCAN) }
                 else -> setStatus("새로고침 · 로딩 확인 중")
             }
             // 빙글빙글이 사라지면 그 뒤에 찍은 화면으로 판단
@@ -295,7 +295,8 @@ class CatcherService : AccessibilityService() {
         // 시간대 안 열차의 원하는 등급 상태(매진/가격)를 전부 읽었는지 확인
         val wanted = when (prefs.seatMode) { 0 -> listOf("일반실"); 1 -> listOf("특실"); else -> listOf("일반실", "특실") }
         val inRange = rows.filter { it.depMin in prefs.startMin..prefs.endMin }
-        val complete = rows.isNotEmpty() && inRange.all { r ->
+        val bottomRow = rows.maxByOrNull { it.depMin }   // 맨 아래 줄은 잘려 있을 수 있어 제외
+        val complete = rows.isNotEmpty() && inRange.filter { it !== bottomRow || inRange.size == 1 }.all { r ->
             wanted.all { c -> r.seats.any { it.cls == c && it.status.isNotEmpty() } }
         }
         if (!complete && now - stateSince < 4000) {
