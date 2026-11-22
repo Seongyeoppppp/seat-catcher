@@ -13,6 +13,15 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    // 빌드할 때마다 같은 키로 서명 → 덮어서 설치 가능 (개인용 디버그 키)
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug-fixed.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
         release { isMinifyEnabled = false }
     }
