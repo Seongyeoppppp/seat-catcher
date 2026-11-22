@@ -53,7 +53,8 @@ class CatcherService : AccessibilityService() {
         @Volatile var statusText: String = "꺼져 있음"
         @Volatile var running: Boolean = false
 
-        private const val TICK_MS = 700L
+        private const val TICK_MS = 150L
+        private const val OCR_SCALE = 0.6f
         private const val MAX_FAILS = 15
 
         private val SUCCESS_KEYS = listOf("결제하기", "결제기한", "결제금액", "결제수단", "예약완료", "예매완료", "발권하기")
@@ -175,7 +176,7 @@ class CatcherService : AccessibilityService() {
         }
     }
 
-    private fun ocrValid() = ocrShotAt > lastActionAt + 250
+    private fun ocrValid() = ocrShotAt > lastActionAt + 120
 
     private fun step() {
         val now = now()
@@ -270,7 +271,7 @@ class CatcherService : AccessibilityService() {
             if (list != null && list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
                 lastActionAt = now()
                 forwardScrolls++
-                go(State.WAIT_LOAD, 900)
+                go(State.WAIT_LOAD, 300)
                 return
             }
         }
@@ -294,7 +295,7 @@ class CatcherService : AccessibilityService() {
             return
         }
         // 창 안의 [일반실 | 특실] 토글을 원하는 등급으로
-        if (!sheetToggled) {
+        if (!sheetToggled && targetCls != "일반실") {   // 예매 창은 일반실이 기본 선택
             sheetToggled = true
             val toggle = items.filter {
                 ScreenParser.norm(it.text) == targetCls &&
@@ -303,7 +304,7 @@ class CatcherService : AccessibilityService() {
             }.maxByOrNull { it.rect.centerY() }
             if (toggle != null) {
                 clickRect(toggle.node, toggle.rect, win)
-                waitUntil = now + 500
+                waitUntil = now + 200
                 return
             }
         }
@@ -397,7 +398,7 @@ class CatcherService : AccessibilityService() {
         nextRefreshAt = now() + (base * Random.nextDouble(0.8, 1.3)).toLong()
         mustRefresh = false
         setStatus(if (ok) "새로고침" else "새로고침 버튼을 못 찾음 (디버그 덤프 보내주세요)")
-        go(State.WAIT_LOAD, 1200)
+        go(State.WAIT_LOAD, 300)
     }
 
     private fun finish(msg: String, success: Boolean) {
@@ -565,7 +566,7 @@ class CatcherService : AccessibilityService() {
             return
         }
         val now = now()
-        if (ocrBusy || now - lastShotReq < 600) return
+        if (ocrBusy || now - lastShotReq < 340) return  // 안드로이드 캡처 최소 간격 ≈333ms
         ocrBusy = true
         lastShotReq = now
         val shotAt = now
@@ -586,14 +587,22 @@ class CatcherService : AccessibilityService() {
                         ocrBusy = false
                         return
                     }
-                    recognizer.process(InputImage.fromBitmap(bmp, 0))
+                    val small = Bitmap.createScaledBitmap(
+                        bmp, (bmp.width * OCR_SCALE).toInt(), (bmp.height * OCR_SCALE).toInt(), true,
+                    )
+                    if (small !== bmp) bmp.recycle()
+                    fun up(r: Rect) = Rect(
+                        (r.left / OCR_SCALE).toInt(), (r.top / OCR_SCALE).toInt(),
+                        (r.right / OCR_SCALE).toInt(), (r.bottom / OCR_SCALE).toInt(),
+                    )
+                    recognizer.process(InputImage.fromBitmap(small, 0))
                         .addOnSuccessListener { text ->
                             val out = ArrayList<ScreenParser.Item>()
                             for (b in text.textBlocks) for (l in b.lines) {
-                                l.boundingBox?.let { r ->
+                                l.boundingBox?.let { up(it) }?.let { r ->
                                     if (covers.none { it.contains(r.centerX(), r.centerY()) }) out.add(ScreenParser.Item(l.text, r, null, false))
                                 }
-                                for (e in l.elements) e.boundingBox?.let { r ->
+                                for (e in l.elements) e.boundingBox?.let { up(it) }?.let { r ->
                                     if (covers.none { it.contains(r.centerX(), r.centerY()) }) out.add(ScreenParser.Item(e.text, r, null, false))
                                 }
                             }
@@ -601,12 +610,15 @@ class CatcherService : AccessibilityService() {
                             ocrShotAt = shotAt
                             ocrError = if (out.isEmpty()) "화면에서 글자를 못 읽음 (캡처가 막혔을 수 있음)" else ""
                             ocrBusy = false
-                            bmp.recycle()
+                            small.recycle()
+                            // 결과 나오자마자 바로 판단
+                            handler.removeCallbacks(tick)
+                            handler.post(tick)
                         }
                         .addOnFailureListener { e ->
                             ocrError = "글자 인식 실패: ${e.message}"
                             ocrBusy = false
-                            bmp.recycle()
+                            small.recycle()
                         }
                 }
 
