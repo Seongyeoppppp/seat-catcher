@@ -64,7 +64,10 @@ class CatcherService : AccessibilityService() {
         private val CLOSE_BUTTONS = setOf("확인", "닫기")
     }
 
-    private enum class State { IDLE, SCAN, WAIT_LOAD, WAIT_SHEET, WAIT_RESULT }
+    private enum class State { IDLE, SCAN, WAIT_LOAD, LOAD_APPEAR, LOAD_GONE, WAIT_SHEET, WAIT_RESULT }
+
+    private var scanDoneAt = 0L      // 화면 확인(전부 매진)이 끝난 시각
+    private var spinnerSeen = false
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var prefs: Prefs
@@ -159,6 +162,7 @@ class CatcherService : AccessibilityService() {
     // ───────────── main loop ─────────────
 
     private fun go(s: State, waitMs: Long = 0) {
+        if (s == State.SCAN || s == State.WAIT_LOAD) scanDoneAt = 0L
         state = s
         stateSince = now()
         waitUntil = now() + waitMs
@@ -221,6 +225,18 @@ class CatcherService : AccessibilityService() {
         when (state) {
             State.IDLE -> Unit
             State.WAIT_LOAD -> if (now >= waitUntil) go(State.SCAN)
+            // 새로고침 후: 빙글빙글이 나타나길 기다림 (안 나타나면 금방 끝난 것)
+            State.LOAD_APPEAR -> when {
+                isLoading() -> { spinnerSeen = true; go(State.LOAD_GONE); setStatus("로딩 중…") }
+                now - stateSince > 2500 -> { lastActionAt = now; go(State.SCAN) }
+                else -> setStatus("새로고침 · 로딩 확인 중")
+            }
+            // 빙글빙글이 사라지면 그 뒤에 찍은 화면으로 판단
+            State.LOAD_GONE -> when {
+                !isLoading() -> { lastActionAt = now; go(State.SCAN) }
+                now - stateSince > 15_000 -> { setStatus("응답이 없어서 다시 새로고침"); refresh(root, items, win) }
+                else -> setStatus("로딩 중… ${(now - stateSince) / 1000}초")
+            }
             State.SCAN -> doScan(root, items, win)
             State.WAIT_SHEET -> doSheet(items, win)
             State.WAIT_RESULT -> doResult(items, win)
@@ -276,12 +292,27 @@ class CatcherService : AccessibilityService() {
             }
         }
 
+        // 시간대 안 열차의 원하는 등급 상태(매진/가격)를 전부 읽었는지 확인
+        val wanted = when (prefs.seatMode) { 0 -> listOf("일반실"); 1 -> listOf("특실"); else -> listOf("일반실", "특실") }
+        val inRange = rows.filter { it.depMin in prefs.startMin..prefs.endMin }
+        val complete = rows.isNotEmpty() && inRange.all { r ->
+            wanted.all { c -> r.seats.any { it.cls == c && it.status.isNotEmpty() } }
+        }
+        if (!complete && now - stateSince < 4000) {
+            setStatus("결과 읽는 중… (${rows.size}개 열차)")
+            return
+        }
+        if (scanDoneAt == 0L) {
+            scanDoneAt = now
+            val rest = prefs.intervalSec.coerceAtLeast(0) * 1000L
+            nextRefreshAt = now + if (rest == 0L) 0L else (rest * Random.nextDouble(0.8, 1.3)).toLong()
+        }
         if (now >= nextRefreshAt) {
             refresh(root, items, win)
             return
         }
-        val visible = if (rows.isEmpty()) "열차 인식 안 됨" else "열차 ${rows.size}개 인식(${rows.first().depText}~${rows.last().depText})"
-        setStatus("감시 중 · $visible · 다음 새로고침 ${(nextRefreshAt - now) / 1000}초")
+        val visible = if (inRange.isEmpty()) "시간대 열차 안 보임" else "${inRange.size}개 열차 매진 확인"
+        setStatus("$visible · ${(nextRefreshAt - now) / 100 / 10.0}초 뒤 새로고침")
     }
 
     private fun doSheet(items: List<ScreenParser.Item>, win: AccessibilityWindowInfo) {
@@ -394,11 +425,10 @@ class CatcherService : AccessibilityService() {
         val btn = ScreenParser.findRefresh(items, screenW, screenH)
         val ok = if (btn != null) clickNode(btn, win) else swipeDown(win)
         lastActionAt = now()
-        val base = prefs.intervalSec.coerceAtLeast(2) * 1000L
-        nextRefreshAt = now() + (base * Random.nextDouble(0.8, 1.3)).toLong()
         mustRefresh = false
+        spinnerSeen = false
         setStatus(if (ok) "새로고침" else "새로고침 버튼을 못 찾음 (디버그 덤프 보내주세요)")
-        go(State.WAIT_LOAD, 300)
+        go(State.LOAD_APPEAR)
     }
 
     private fun finish(msg: String, success: Boolean) {
@@ -550,6 +580,32 @@ class CatcherService : AccessibilityService() {
         overlay = null
     }
 
+    // ───────────── 로딩(빙글빙글) 감지 ─────────────
+
+    /** 코레일 창 어딘가에 진행 표시(ProgressBar, Compose 로딩 인디케이터)가 보이면 true */
+    private fun isLoading(): Boolean = try {
+        windows.filter { it.root?.packageName?.toString()?.contains("korail", ignoreCase = true) == true }
+            .any { w -> w.root?.let { hasProgress(it) } == true }
+    } catch (e: Exception) { false }
+
+    private fun hasProgress(root: AccessibilityNodeInfo): Boolean {
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        var n = 0
+        while (stack.isNotEmpty() && n++ < 4000) {
+            val x = stack.removeLast()
+            if (x.isVisibleToUser) {
+                val cls = x.className?.toString() ?: ""
+                val desc = (x.contentDescription ?: x.text ?: "").toString()
+                if (cls.contains("ProgressBar") || (x.rangeInfo != null && !cls.contains("SeekBar")) ||
+                    desc.contains("로딩") || desc.contains("loading", ignoreCase = true) || desc.contains("잠시만")
+                ) return true
+            }
+            for (i in 0 until x.childCount) x.getChild(i)?.let { stack.addLast(it) }
+        }
+        return false
+    }
+
     // ───────────── OCR ─────────────
 
     /** 코레일 위에 떠 있는 다른 앱/시스템 창(알림 배너, 상태바, 우리 상태바) 영역 */
@@ -646,6 +702,7 @@ class CatcherService : AccessibilityService() {
         } catch (_: Exception) {
         }
         sb.append("---\n").append(ScreenParser.dump(root))
+        sb.append("--- loading=${isLoading()}\n")
         sb.append("--- OCR (${ocrItems.size}개, 오류='$ocrError')\n")
         ocrItems.forEach { sb.append("'${it.text}' ${it.rect.toShortString()}\n") }
         val rows = ScreenParser.parseRows(ScreenParser.collect(root) + ocrItems, screenW, screenH)

@@ -28,7 +28,7 @@ class Prefs(ctx: Context) {
         set(v) = sp.edit().putInt("seat", v).apply()
 
     var intervalSec: Int
-        get() = sp.getInt("interval", 2)
+        get() = sp.getInt("interval", 1)
         set(v) = sp.edit().putInt("interval", v).apply()
 
     var maxMinutes: Int

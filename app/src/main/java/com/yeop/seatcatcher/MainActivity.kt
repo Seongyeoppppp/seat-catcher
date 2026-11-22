@@ -90,8 +90,8 @@ class MainActivity : Activity() {
         rg.check(1000 + prefs.seatMode)
         col.addView(rg)
 
-        label("새로고침 간격(초, 최소 2 · 실제론 ±랜덤)")
-        val interval = edit("2", prefs.intervalSec.toString(), number = true)
+        label("매진 확인 후 쉬는 시간(초, 0 = 바로 새로고침)\n※ 새로고침은 로딩이 끝나고 화면을 다 읽은 뒤에만 해요")
+        val interval = edit("1", prefs.intervalSec.toString(), number = true)
         label("최대 실행 시간(분)")
         val maxMin = edit("180", prefs.maxMinutes.toString(), number = true)
 
@@ -107,7 +107,7 @@ class MainActivity : Activity() {
             prefs.startMin = s
             prefs.endMin = e
             prefs.seatMode = (rg.checkedRadioButtonId - 1000).coerceIn(0, 2)
-            prefs.intervalSec = (interval.text.toString().toIntOrNull() ?: 2).coerceAtLeast(2)
+            prefs.intervalSec = (interval.text.toString().toIntOrNull() ?: 1).coerceAtLeast(0)
             prefs.maxMinutes = (maxMin.text.toString().toIntOrNull() ?: 180).coerceIn(5, 720)
             return true
         }
