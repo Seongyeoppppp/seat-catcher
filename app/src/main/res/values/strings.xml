@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">좌석잡이</string>
+    <string name="a11y_desc">코레일 앱 조회 화면에서 지정한 시간대의 좌석(가격 표시)이 뜨면 대신 눌러 바로 예매하고 알림을 보냅니다. 코레일 앱이 맨 앞에 있을 때만 동작합니다.</string>
+</resources>
